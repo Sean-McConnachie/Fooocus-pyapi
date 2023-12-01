@@ -1,5 +1,7 @@
 import threading
 
+from modules.params import HandlerParams, UovMethod, OutpaintDirection, CnTask, AspectRatio
+
 
 class AsyncTask:
     def __init__(self, args):
@@ -110,48 +112,73 @@ def worker():
         async_task.results = async_task.results + [wall]
         return
 
+    def web_handler(async_task):
+        params: HandlerParams = HandlerParams()
+        args: list = async_task.args
+        args.reverse()
+
+        params.prompt = args.pop()
+        params.negative_prompt = args.pop()
+        params.style_selections = args.pop()
+        params.steps = args.pop()
+        params.aspect_ratio = AspectRatio.from_str(args.pop())
+        params.im_count = int(args.pop())
+        params.im_seed = int(args.pop())
+        params.sharpness = float(args.pop())
+        params.guidance_scale = float(args.pop())
+        params.base_model_name = args.pop()
+        params.refiner_model_name = args.pop()
+        params.refiner_switch = args.pop()
+        params.loras = [[str(args.pop()), float(args.pop())] for _ in range(5)]
+        params.input_image_checkbox = args.pop()
+        params.current_tab = args.pop()
+        params.uov_method = UovMethod.from_str(args.pop())
+        params.uov_input_image = args.pop()
+        params.outpaint_directions = OutpaintDirection.from_str(args.pop())
+        params.inpaint_input_image = args.pop()
+        params.inpaint_additional_prompt = args.pop()
+
+        for _ in range(4):
+            cn_task = CnTask()
+            cn_task.im = args.pop()
+            cn_task.stop = args.pop()
+            cn_task.weight = args.pop()
+            cn_type = args.pop()
+            if cn_task.im is not None:
+                match cn_type:
+                    case flags.cn_ip:
+                        params.cn_image_prompt.append(cn_task)
+                    case flags.cn_ip_face:
+                        params.cn_face_swap.append(cn_task)
+                    case flags.cn_canny:
+                        params.cn_pyra_canny.append(cn_task)
+                    case flags.cn_cpds:
+                        params.cn_cpds.append(cn_task)
+
+        if params.steps == "Speed":
+            params.steps = 30
+        elif params.steps == "Quality":
+            params.steps = 60
+        elif params.steps == "Extreme Speed":
+            params.steps = 8
+
+        async_task.args = params
+
+        handler(async_task)
+
+    def py_handler(handler_params: HandlerParams):
+        ...  # TODO
+
     @torch.no_grad()
     @torch.inference_mode()
     def handler(async_task):
         execution_start_time = time.perf_counter()
 
-        args = async_task.args
-        args.reverse()
+        args: HandlerParams = async_task.args
 
-        prompt = args.pop()
-        negative_prompt = args.pop()
-        style_selections = args.pop()
-        performance_selection = args.pop()
-        aspect_ratios_selection = args.pop()
-        image_number = args.pop()
-        image_seed = args.pop()
-        sharpness = args.pop()
-        guidance_scale = args.pop()
-        base_model_name = args.pop()
-        refiner_model_name = args.pop()
-        refiner_switch = args.pop()
-        loras = [[str(args.pop()), float(args.pop())] for _ in range(5)]
-        input_image_checkbox = args.pop()
-        current_tab = args.pop()
-        uov_method = args.pop()
-        uov_input_image = args.pop()
-        outpaint_selections = args.pop()
-        inpaint_input_image = args.pop()
-        inpaint_additional_prompt = args.pop()
-
-        cn_tasks = {x: [] for x in flags.ip_list}
-        for _ in range(4):
-            cn_img = args.pop()
-            cn_stop = args.pop()
-            cn_weight = args.pop()
-            cn_type = args.pop()
-            if cn_img is not None:
-                cn_tasks[cn_type].append([cn_img, cn_stop, cn_weight])
-
-        outpaint_selections = [o.lower() for o in outpaint_selections]
         base_model_additional_loras = []
+        style_selections = [style for style in args.style_selections]
         raw_style_selections = copy.deepcopy(style_selections)
-        uov_method = uov_method.lower()
 
         if fooocus_expansion in style_selections:
             use_expansion = True
@@ -161,44 +188,32 @@ def worker():
 
         use_style = len(style_selections) > 0
 
-        if base_model_name == refiner_model_name:
+        if args.base_model_name == args.refiner_model_name:
             print(f'Refiner disabled because base model and refiner are same.')
-            refiner_model_name = 'None'
+            args.refiner_model_name = None
 
-        assert performance_selection in ['Speed', 'Quality', 'Extreme Speed']
-
-        steps = 30
-
-        if performance_selection == 'Speed':
-            steps = 30
-
-        if performance_selection == 'Quality':
-            steps = 60
-
-        if performance_selection == 'Extreme Speed':
+        if args.steps < 10:  # extreme speed
             print('Enter LCM mode.')
             progressbar(async_task, 1, 'Downloading LCM components ...')
-            loras += [(modules.config.downloading_sdxl_lcm_lora(), 1.0)]
+            args.loras.append(modules.config.downloading_sdxl_lcm_lora(), 1.0)
 
-            if refiner_model_name != 'None':
+            if args.refiner_model_name is not None:
                 print(f'Refiner disabled in LCM mode.')
 
-            refiner_model_name = 'None'
-            sampler_name = advanced_parameters.sampler_name = 'lcm'
-            scheduler_name = advanced_parameters.scheduler_name = 'lcm'
-            modules.patch.sharpness = sharpness = 0.0
-            cfg_scale = guidance_scale = 1.0
+            args.refiner_model_name = None
+            modules.patch.sharpness = args.sharpness = 0.0
+            guidance_scale = 1.0
             modules.patch.adaptive_cfg = advanced_parameters.adaptive_cfg = 1.0
             refiner_switch = 1.0
             modules.patch.positive_adm_scale = advanced_parameters.adm_scaler_positive = 1.0
             modules.patch.negative_adm_scale = advanced_parameters.adm_scaler_negative = 1.0
             modules.patch.adm_scaler_end = advanced_parameters.adm_scaler_end = 0.0
-            steps = 8
+            args.steps = 8
 
         modules.patch.adaptive_cfg = advanced_parameters.adaptive_cfg
         print(f'[Parameters] Adaptive CFG = {modules.patch.adaptive_cfg}')
 
-        modules.patch.sharpness = sharpness
+        modules.patch.sharpness = args.sharpness
         print(f'[Parameters] Sharpness = {modules.patch.sharpness}')
 
         modules.patch.positive_adm_scale = advanced_parameters.adm_scaler_positive
@@ -209,14 +224,14 @@ def worker():
               f'{modules.patch.negative_adm_scale} : '
               f'{modules.patch.adm_scaler_end}')
 
-        cfg_scale = float(guidance_scale)
+        cfg_scale = float(args.guidance_scale)
         print(f'[Parameters] CFG = {cfg_scale}')
 
         initial_latent = None
         denoising_strength = 1.0
         tiled = False
 
-        width, height = aspect_ratios_selection.replace('×', ' ').split(' ')[:2]
+        width, height = args.aspect_ratio.value.split('x')
         width, height = int(width), int(height)
 
         skip_prompt_processing = False
@@ -234,8 +249,7 @@ def worker():
         controlnet_cpds_path = None
         clip_vision_path, ip_negative_path, ip_adapter_path, ip_adapter_face_path = None, None, None, None
 
-        seed = int(image_seed)
-        print(f'[Parameters] Seed = {seed}')
+        print(f'[Parameters] Seed = {args.im_seed}')
 
         sampler_name = advanced_parameters.sampler_name
         scheduler_name = advanced_parameters.scheduler_name
@@ -243,39 +257,34 @@ def worker():
         goals = []
         tasks = []
 
-        if input_image_checkbox:
-            if (current_tab == 'uov' or (
-                    current_tab == 'ip' and advanced_parameters.mixing_image_prompt_and_vary_upscale)) \
-                    and uov_method != flags.disabled and uov_input_image is not None:
-                uov_input_image = HWC3(uov_input_image)
-                if 'vary' in uov_method:
+        if args.input_image_checkbox:
+            if (args.current_tab == 'uov' or (
+                    args.current_tab == 'ip' and advanced_parameters.mixing_image_prompt_and_vary_upscale)) \
+                    and args.uov_method.value != flags.disabled and args.uov_input_image is not None:
+                uov_input_image = HWC3(args.uov_input_image)
+                if args.uov_method == UovMethod.VARY:
                     goals.append('vary')
-                elif 'upscale' in uov_method:
+                elif args.uov_method in [UovMethod.UPSCALE_1_5, UovMethod.UPSCALE_2, UovMethod.UPSCALE]:
                     goals.append('upscale')
-                    if 'fast' in uov_method:
+                    if args.uov_method == UovMethod.FAST:
                         skip_prompt_processing = True
                     else:
-                        steps = 18
-
-                        if performance_selection == 'Speed':
-                            steps = 18
-
-                        if performance_selection == 'Quality':
-                            steps = 36
-
-                        if performance_selection == 'Extreme Speed':
-                            steps = 8
+                        args.steps = 18
+                        if args.steps == 30:
+                            args.steps = 18
+                        elif args.steps == 60:
+                            args.steps = 36
 
                     progressbar(async_task, 1, 'Downloading upscale models ...')
                     modules.config.downloading_upscale_model()
-            if (current_tab == 'inpaint' or (
-                    current_tab == 'ip' and advanced_parameters.mixing_image_prompt_and_inpaint)) \
-                    and isinstance(inpaint_input_image, dict):
-                inpaint_image = inpaint_input_image['image']
-                inpaint_mask = inpaint_input_image['mask'][:, :, 0]
+            if (args.current_tab == 'inpaint' or (
+                    args.current_tab == 'ip' and advanced_parameters.mixing_image_prompt_and_inpaint)) \
+                    and isinstance(args.inpaint_input_image, dict):
+                inpaint_image = args.inpaint_input_image['image']
+                inpaint_mask = args.inpaint_input_image['mask'][:, :, 0]
                 inpaint_image = HWC3(inpaint_image)
                 if isinstance(inpaint_image, np.ndarray) and isinstance(inpaint_mask, np.ndarray) \
-                        and (np.any(inpaint_mask > 127) or len(outpaint_selections) > 0):
+                        and (np.any(inpaint_mask > 127) or len(args.outpaint_directions) > 0):
                     if inpaint_parameterized:
                         progressbar(async_task, 1, 'Downloading inpainter ...')
                         modules.config.downloading_upscale_model()
@@ -283,30 +292,30 @@ def worker():
                             advanced_parameters.inpaint_engine)
                         base_model_additional_loras += [(inpaint_patch_model_path, 1.0)]
                         print(f'[Inpaint] Current inpaint model is {inpaint_patch_model_path}')
-                        if refiner_model_name == 'None':
+                        if args.refiner_model_name is None:
                             use_synthetic_refiner = True
-                            refiner_switch = 0.5
+                            args.refiner_switch = 0.5
                     else:
                         inpaint_head_model_path, inpaint_patch_model_path = None, None
                         print(f'[Inpaint] Parameterized inpaint is disabled.')
-                    if inpaint_additional_prompt != '':
-                        if prompt == '':
-                            prompt = inpaint_additional_prompt
+                    if args.inpaint_additional_prompt != '':
+                        if args.prompt == '':
+                            args.prompt = args.inpaint_additional_prompt
                         else:
-                            prompt = inpaint_additional_prompt + '\n' + prompt
+                            args.prompt = args.inpaint_additional_prompt + '\n' + args.prompt
                     goals.append('inpaint')
-            if current_tab == 'ip' or \
+            if args.current_tab == 'ip' or \
                     advanced_parameters.mixing_image_prompt_and_inpaint or \
                     advanced_parameters.mixing_image_prompt_and_vary_upscale:
                 goals.append('cn')
                 progressbar(async_task, 1, 'Downloading control models ...')
-                if len(cn_tasks[flags.cn_canny]) > 0:
+                if len(args.cn_pyra_canny) > 0:
                     controlnet_canny_path = modules.config.downloading_controlnet_canny()
-                if len(cn_tasks[flags.cn_cpds]) > 0:
+                if len(args.cn_cpds) > 0:
                     controlnet_cpds_path = modules.config.downloading_controlnet_cpds()
-                if len(cn_tasks[flags.cn_ip]) > 0:
+                if len(args.cn_image_prompt) > 0:
                     clip_vision_path, ip_negative_path, ip_adapter_path = modules.config.downloading_ip_adapters('ip')
-                if len(cn_tasks[flags.cn_ip_face]) > 0:
+                if len(args.cn_face_swap) > 0:
                     clip_vision_path, ip_negative_path, ip_adapter_face_path = modules.config.downloading_ip_adapters(
                         'face')
                 progressbar(async_task, 1, 'Loading control models ...')
@@ -316,10 +325,10 @@ def worker():
         ip_adapter.load_ip_adapter(clip_vision_path, ip_negative_path, ip_adapter_path)
         ip_adapter.load_ip_adapter(clip_vision_path, ip_negative_path, ip_adapter_face_path)
 
-        switch = int(round(steps * refiner_switch))
+        switch = int(round(args.steps * args.refiner_switch))
 
         if advanced_parameters.overwrite_step > 0:
-            steps = advanced_parameters.overwrite_step
+            args.steps = advanced_parameters.overwrite_step
 
         if advanced_parameters.overwrite_switch > 0:
             switch = advanced_parameters.overwrite_switch
@@ -331,14 +340,14 @@ def worker():
             height = advanced_parameters.overwrite_height
 
         print(f'[Parameters] Sampler = {sampler_name} - {scheduler_name}')
-        print(f'[Parameters] Steps = {steps} - {switch}')
+        print(f'[Parameters] Steps = {args.steps} - {switch}')
 
         progressbar(async_task, 1, 'Initializing ...')
 
         if not skip_prompt_processing:
 
-            prompts = remove_empty_str([safe_str(p) for p in prompt.splitlines()], default='')
-            negative_prompts = remove_empty_str([safe_str(p) for p in negative_prompt.splitlines()], default='')
+            prompts = remove_empty_str([safe_str(p) for p in args.prompt.splitlines()], default='')
+            negative_prompts = remove_empty_str([safe_str(p) for p in args.negative_prompt.splitlines()], default='')
 
             prompt = prompts[0]
             negative_prompt = negative_prompts[0]
@@ -351,14 +360,15 @@ def worker():
             extra_negative_prompts = negative_prompts[1:] if len(negative_prompts) > 1 else []
 
             progressbar(async_task, 3, 'Loading models ...')
-            pipeline.refresh_everything(refiner_model_name=refiner_model_name, base_model_name=base_model_name,
-                                        loras=loras, base_model_additional_loras=base_model_additional_loras,
+            pipeline.refresh_everything(refiner_model_name=args.refiner_model_name,
+                                        base_model_name=args.base_model_name,
+                                        loras=args.loras, base_model_additional_loras=base_model_additional_loras,
                                         use_synthetic_refiner=use_synthetic_refiner)
 
             progressbar(async_task, 3, 'Processing prompts ...')
             tasks = []
-            for i in range(image_number):
-                task_seed = (seed + i) % (constants.MAX_SEED + 1)  # randint is inclusive, % is not
+            for i in range(args.im_count):
+                task_seed = (args.im_seed + i) % (constants.MAX_SEED + 1)  # randint is inclusive, % is not
                 task_rng = random.Random(task_seed)  # may bind to inpaint noise in the future
 
                 task_prompt = apply_wildcards(prompt, task_rng)
@@ -423,14 +433,14 @@ def worker():
             progressbar(async_task, 13, 'Image processing ...')
 
         if 'vary' in goals:
-            if 'subtle' in uov_method:
+            if args.uov_method == UovMethod.SUBTLE:
                 denoising_strength = 0.5
-            if 'strong' in uov_method:
+            if args.uov_method == UovMethod.STRONG:
                 denoising_strength = 0.85
             if advanced_parameters.overwrite_vary_strength > 0:
                 denoising_strength = advanced_parameters.overwrite_vary_strength
 
-            shape_ceil = get_image_shape_ceil(uov_input_image)
+            shape_ceil = get_image_shape_ceil(args.uov_input_image)
             if shape_ceil < 1024:
                 print(f'[Vary] Image is resized because it is too small.')
                 shape_ceil = 1024
@@ -438,13 +448,13 @@ def worker():
                 print(f'[Vary] Image is resized because it is too big.')
                 shape_ceil = 2048
 
-            uov_input_image = set_image_shape_ceil(uov_input_image, shape_ceil)
+            uov_input_image = set_image_shape_ceil(args.uov_input_image, shape_ceil)
 
             initial_pixels = core.numpy_to_pytorch(uov_input_image)
             progressbar(async_task, 13, 'VAE encoding ...')
 
             candidate_vae, _ = pipeline.get_candidate_vae(
-                steps=steps,
+                steps=args.steps,
                 switch=switch,
                 denoise=denoising_strength,
                 refiner_swap_method=refiner_swap_method
@@ -457,14 +467,14 @@ def worker():
             print(f'Final resolution is {str((height, width))}.')
 
         if 'upscale' in goals:
-            H, W, C = uov_input_image.shape
+            H, W, C = args.uov_input_image.shape
             progressbar(async_task, 13, f'Upscaling image from {str((H, W))} ...')
-            uov_input_image = perform_upscale(uov_input_image)
+            uov_input_image = perform_upscale(args.uov_input_image)
             print(f'Image upscaled.')
 
-            if '1.5x' in uov_method:
+            if args.uov_method == UovMethod.UPSCALE_1_5:
                 f = 1.5
-            elif '2x' in uov_method:
+            elif args.uov_method == UovMethod.UPSCALE_2:
                 f = 2.0
             else:
                 f = 1.0
@@ -480,7 +490,7 @@ def worker():
 
             image_is_super_large = shape_ceil > 2800
 
-            if 'fast' in uov_method:
+            if args.uov_method == UovMethod.FAST:
                 direct_return = True
             elif image_is_super_large:
                 print('Image is too large. Directly returned the SR image. '
@@ -506,7 +516,7 @@ def worker():
             progressbar(async_task, 13, 'VAE encoding ...')
 
             candidate_vae, _ = pipeline.get_candidate_vae(
-                steps=steps,
+                steps=args.steps,
                 switch=switch,
                 denoise=denoising_strength,
                 refiner_swap_method=refiner_swap_method
@@ -521,23 +531,23 @@ def worker():
             print(f'Final resolution is {str((height, width))}.')
 
         if 'inpaint' in goals:
-            if len(outpaint_selections) > 0:
+            if len(args.outpaint_directions) > 0:
                 H, W, C = inpaint_image.shape
-                if 'top' in outpaint_selections:
+                if OutpaintDirection.TOP in args.outpaint_directions:
                     inpaint_image = np.pad(inpaint_image, [[int(H * 0.3), 0], [0, 0], [0, 0]], mode='edge')
                     inpaint_mask = np.pad(inpaint_mask, [[int(H * 0.3), 0], [0, 0]], mode='constant',
                                           constant_values=255)
-                if 'bottom' in outpaint_selections:
+                if OutpaintDirection.BOTTOM in args.outpaint_directions:
                     inpaint_image = np.pad(inpaint_image, [[0, int(H * 0.3)], [0, 0], [0, 0]], mode='edge')
                     inpaint_mask = np.pad(inpaint_mask, [[0, int(H * 0.3)], [0, 0]], mode='constant',
                                           constant_values=255)
 
                 H, W, C = inpaint_image.shape
-                if 'left' in outpaint_selections:
+                if OutpaintDirection.LEFT in args.outpaint_directions:
                     inpaint_image = np.pad(inpaint_image, [[0, 0], [int(H * 0.3), 0], [0, 0]], mode='edge')
                     inpaint_mask = np.pad(inpaint_mask, [[0, 0], [int(H * 0.3), 0]], mode='constant',
                                           constant_values=255)
-                if 'right' in outpaint_selections:
+                if OutpaintDirection.RIGHT in args.outpaint_directions:
                     inpaint_image = np.pad(inpaint_image, [[0, 0], [0, int(H * 0.3)], [0, 0]], mode='edge')
                     inpaint_mask = np.pad(inpaint_mask, [[0, 0], [0, int(H * 0.3)]], mode='constant',
                                           constant_values=255)
@@ -568,7 +578,7 @@ def worker():
             inpaint_pixel_mask = core.numpy_to_pytorch(inpaint_worker.current_task.interested_mask)
 
             candidate_vae, candidate_vae_swap = pipeline.get_candidate_vae(
-                steps=steps,
+                steps=args.steps,
                 switch=switch,
                 denoise=denoising_strength,
                 refiner_swap_method=refiner_swap_method
@@ -611,57 +621,53 @@ def worker():
             print(f'Final resolution is {str((final_height, final_width))}, latent is {str((height, width))}.')
 
         if 'cn' in goals:
-            for task in cn_tasks[flags.cn_canny]:
-                cn_img, cn_stop, cn_weight = task
-                cn_img = resize_image(HWC3(cn_img), width=width, height=height)
+            for task in args.cn_pyra_canny:
+                task.im = resize_image(HWC3(task.im), width=width, height=height)
 
                 if not advanced_parameters.skipping_cn_preprocessor:
-                    cn_img = preprocessors.canny_pyramid(cn_img)
+                    task.im = preprocessors.canny_pyramid(task.im)
 
-                cn_img = HWC3(cn_img)
-                task[0] = core.numpy_to_pytorch(cn_img)
+                task.im = HWC3(task.im)
+                task[0] = core.numpy_to_pytorch(task.im)
                 if advanced_parameters.debugging_cn_preprocessor:
-                    yield_result(async_task, cn_img, do_not_show_finished_images=True)
+                    yield_result(async_task, task.im, do_not_show_finished_images=True)
                     return
-            for task in cn_tasks[flags.cn_cpds]:
-                cn_img, cn_stop, cn_weight = task
-                cn_img = resize_image(HWC3(cn_img), width=width, height=height)
+            for task in args.cn_cpds:
+                task.im = resize_image(HWC3(task.im), width=width, height=height)
 
                 if not advanced_parameters.skipping_cn_preprocessor:
-                    cn_img = preprocessors.cpds(cn_img)
+                    task.im = preprocessors.cpds(task.im)
 
-                cn_img = HWC3(cn_img)
-                task[0] = core.numpy_to_pytorch(cn_img)
+                task.im = HWC3(task.im)
+                task.im = core.numpy_to_pytorch(task.im)
                 if advanced_parameters.debugging_cn_preprocessor:
-                    yield_result(async_task, cn_img, do_not_show_finished_images=True)
+                    yield_result(async_task, task.im, do_not_show_finished_images=True)
                     return
-            for task in cn_tasks[flags.cn_ip]:
-                cn_img, cn_stop, cn_weight = task
-                cn_img = HWC3(cn_img)
+            for task in args.cn_image_prompt:
+                task.im = HWC3(task.im)
 
                 # https://github.com/tencent-ailab/IP-Adapter/blob/d580c50a291566bbf9fc7ac0f760506607297e6d/README.md?plain=1#L75
-                cn_img = resize_image(cn_img, width=224, height=224, resize_mode=0)
+                task.im = resize_image(task.im, width=224, height=224, resize_mode=0)
 
-                task[0] = ip_adapter.preprocess(cn_img, ip_adapter_path=ip_adapter_path)
+                task.im = ip_adapter.preprocess(task.im, ip_adapter_path=ip_adapter_path)
                 if advanced_parameters.debugging_cn_preprocessor:
-                    yield_result(async_task, cn_img, do_not_show_finished_images=True)
+                    yield_result(async_task, task.im, do_not_show_finished_images=True)
                     return
-            for task in cn_tasks[flags.cn_ip_face]:
-                cn_img, cn_stop, cn_weight = task
-                cn_img = HWC3(cn_img)
+            for task in args.cn_face_swap:
+                task.im = HWC3(task.im)
 
                 if not advanced_parameters.skipping_cn_preprocessor:
-                    cn_img = fooocus_extras.face_crop.crop_image(cn_img)
+                    task.im = fooocus_extras.face_crop.crop_image(task.im)
 
                 # https://github.com/tencent-ailab/IP-Adapter/blob/d580c50a291566bbf9fc7ac0f760506607297e6d/README.md?plain=1#L75
-                cn_img = resize_image(cn_img, width=224, height=224, resize_mode=0)
+                task.im = resize_image(task.im, width=224, height=224, resize_mode=0)
 
-                task[0] = ip_adapter.preprocess(cn_img, ip_adapter_path=ip_adapter_face_path)
+                task.im = ip_adapter.preprocess(task.im, ip_adapter_path=ip_adapter_face_path)
                 if advanced_parameters.debugging_cn_preprocessor:
-                    yield_result(async_task, cn_img, do_not_show_finished_images=True)
+                    yield_result(async_task, task.im, do_not_show_finished_images=True)
                     return
 
-            all_ip_tasks = cn_tasks[flags.cn_ip] + cn_tasks[flags.cn_ip_face]
+            all_ip_tasks = args.cn_image_prompt + args.cn_face_swap
 
             if len(all_ip_tasks) > 0:
                 pipeline.final_unet = ip_adapter.patch_model(pipeline.final_unet, all_ip_tasks)
@@ -676,7 +682,7 @@ def worker():
                 advanced_parameters.freeu_s2
             )
 
-        all_steps = steps * image_number
+        all_steps = args.steps * args.im_count
 
         print(f'[Parameters] Denoising Strength = {denoising_strength}')
 
@@ -710,12 +716,18 @@ def worker():
         async_task.yields.append(['preview', (13, 'Moving model to GPU ...', None)])
 
         def callback(step, x0, x, total_steps, y):
-            done_steps = current_task_id * steps + step
+            done_steps = current_task_id * args.steps + step
             async_task.yields.append(['preview', (
                 int(15.0 + 85.0 * float(done_steps) / float(all_steps)),
                 f'Step {step}/{total_steps} in the {current_task_id + 1}-th Sampling',
                 y)])
 
+        cn_tasks = {
+            flags.cn_ip: args.cn_image_prompt,
+            flags.cn_ip_face: args.cn_face_swap,
+            flags.cn_canny: args.cn_pyra_canny,
+            flags.cn_cpds: args.cn_cpds
+        }
         for current_task_id, task in enumerate(tasks):
             execution_start_time = time.perf_counter()
 
@@ -735,7 +747,7 @@ def worker():
                 imgs = pipeline.process_diffusion(
                     positive_cond=positive_cond,
                     negative_cond=negative_cond,
-                    steps=steps,
+                    steps=args.steps,
                     switch=switch,
                     width=width,
                     height=height,
@@ -761,22 +773,22 @@ def worker():
                         ('Negative Prompt', task['log_negative_prompt']),
                         ('Fooocus V2 Expansion', task['expansion']),
                         ('Styles', str(raw_style_selections)),
-                        ('Performance', performance_selection),
+                        ('Performance', args.steps),
                         ('Resolution', str((width, height))),
-                        ('Sharpness', sharpness),
-                        ('Guidance Scale', guidance_scale),
+                        ('Sharpness', args.sharpness),
+                        ('Guidance Scale', args.guidance_scale),
                         ('ADM Guidance', str((
                             modules.patch.positive_adm_scale,
                             modules.patch.negative_adm_scale,
                             modules.patch.adm_scaler_end))),
-                        ('Base Model', base_model_name),
-                        ('Refiner Model', refiner_model_name),
-                        ('Refiner Switch', refiner_switch),
+                        ('Base Model', args.base_model_name),
+                        ('Refiner Model', args.refiner_model_name),
+                        ('Refiner Switch', args.refiner_switch),
                         ('Sampler', sampler_name),
                         ('Scheduler', scheduler_name),
                         ('Seed', task['task_seed'])
                     ]
-                    for n, w in loras:
+                    for n, w in args.loras:
                         if n != 'None':
                             d.append((f'LoRA [{n}] weight', w))
                     log(x, d, single_line_number=3)
@@ -800,7 +812,7 @@ def worker():
         if len(async_tasks) > 0:
             task = async_tasks.pop(0)
             try:
-                handler(task)
+                web_handler(task)
             except:
                 traceback.print_exc()
             finally:
